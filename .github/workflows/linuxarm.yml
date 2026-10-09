@@ -1,0 +1,236 @@
+name: Build Linux ARM
+
+on:
+  workflow_dispatch:
+
+env:
+  # $VERSION is used by release scripts
+  VERSION: ${{ github.event.inputs.name || github.ref_name }}
+
+jobs:
+  build-scrcpy-server:
+    runs-on: ubuntu-latest
+    env:
+      GRADLE: gradle  # use native gradle instead of ./gradlew in scripts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Build
+        run: release/build_server.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/scrcpy-server
+
+  test-build-scrcpy-server-without-gradle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Build without gradle
+        run: server/build_without_gradle.sh
+
+  test-client:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+        # Same as build-linux-x86_64
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y meson ninja-build nasm ffmpeg libavcodec-dev \
+             libavdevice-dev libavformat-dev libavutil-dev libswresample-dev \
+             libusb-1.0-0 libusb-1.0-0-dev libv4l-dev \
+             libasound2-dev libpulse-dev \
+             libaudio-dev libfribidi-dev libjack-dev libsndio-dev libx11-dev libxext-dev \
+             libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+             libxkbcommon-dev libdrm-dev libva-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
+             libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev \
+             libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
+        # SDL3 is not available in Ubuntu yet
+      - name: Install SDL3
+        run: |
+          app/deps/sdl.sh linux native shared
+
+      - name: Test
+        run: |
+          export PKG_CONFIG_PATH="$PWD"/app/deps/work/install/linux-native-shared/lib/pkgconfig
+          export LD_LIBRARY_PATH="$PWD"/app/deps/work/install/linux-native-shared/lib
+          release/test_client.sh
+
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check architecture
+        run: |
+            arch=$(uname -m)
+            if [[ "$arch" != x86_64 ]]
+            then
+                echo "Unexpected architecture: $arch" >&2
+                exit 1
+            fi
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+        # https://wiki.libsdl.org/SDL3/README-linux#build-dependencies
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y meson ninja-build nasm ffmpeg libavcodec-dev \
+             libavdevice-dev libavformat-dev libavutil-dev libswresample-dev \
+             libusb-1.0-0 libusb-1.0-0-dev libv4l-dev \
+             libasound2-dev libpulse-dev \
+             libaudio-dev libfribidi-dev libjack-dev libsndio-dev libx11-dev libxext-dev \
+             libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+             libxkbcommon-dev libdrm-dev libva-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
+             libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev \
+             libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
+      - name: Build
+        run: release/build_linux.sh x86_64
+
+      # upload-artifact does not preserve permissions
+      - name: Tar
+        run: |
+            cd release/work/build-linux-x86_64
+            mkdir dist-tar
+            cd dist-tar
+            tar -C .. -cvf dist.tar.gz dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-linux-x86_64-intermediate
+          path: release/work/build-linux-x86_64/dist-tar/
+
+
+
+  build-linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check architecture
+        run: |
+          arch=$(uname -m)
+          if [[ "$arch" != aarch64 ]]
+          then
+              echo "Unexpected architecture: $arch" >&2
+              exit 1
+          fi
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # - name: Update sources list
+      #   run: |
+      #     sudo sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build nasm ffmpeg libsdl2-2.0-0 \
+              libsdl2-dev libavcodec-dev libavdevice-dev libavformat-dev \
+              libavutil-dev libswresample-dev libusb-1.0-0 libusb-1.0-0-dev \
+              libv4l-dev --fix-missing
+      - name: Build
+        run: release/build_linux.sh aarch64
+
+      # upload-artifact does not preserve permissions
+      - name: Tar
+        run: |
+          cd release/work/build-linux-aarch64
+          mkdir dist-tar
+          cd dist-tar
+          tar -C .. -cvf dist.tar.gz dist/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-aarch64-intermediate
+          path: release/work/build-linux-aarch64/dist-tar/
+
+  package-linux-aarch64:
+    needs:
+      - build-scrcpy-server
+      - build-linux-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download scrcpy-server
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/
+
+      - name: Download build-linux-aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: build-linux-aarch64-intermediate
+          path: release/work/build-linux-aarch64/dist-tar/
+
+      # upload-artifact does not preserve permissions
+      - name: Detar
+        run: |
+          cd release/work/build-linux-aarch64
+          tar xf dist-tar/dist.tar.gz
+      - name: Package
+        run: release/package_client.sh linux-aarch64 tar.gz
+
+      - name: Upload release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-aarch64
+          path: release/output/
+
+
+  release:
+    needs:
+      - build-scrcpy-server
+      - package-linux-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download scrcpy-server
+        uses: actions/download-artifact@v8
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/
+
+      - name: Download release-linux-aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-aarch64
+          path: release/output/
+
+      - name: Package server
+        run: release/package_server.sh
+
+      - name: Generate checksums
+        run: release/generate_checksums.sh
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scrcpy-release-${{ env.VERSION }}
+          path: release/output
